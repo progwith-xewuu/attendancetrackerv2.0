@@ -1452,11 +1452,24 @@ function renderReportsPage(){
   if (state.reportFrom) records = records.filter(r => r.date >= state.reportFrom);
   if (state.reportTo) records = records.filter(r => r.date <= state.reportTo);
 
+  // Every in-range record is bucketed by student ID exactly once. Buckets claimed by a
+  // student on the roster feed that student's row; whatever is left over belongs to
+  // student IDs that are no longer on the roster ("unlinked"). This keeps
+  // overall.total === sum of the Total column, instead of silently dropping the leftovers.
+  const byStudent = new Map();
+  records.forEach(r => {
+    if (!byStudent.has(r.studentId)) byStudent.set(r.studentId, []);
+    byStudent.get(r.studentId).push(r);
+  });
+
   const summary = students.map(s => {
-    const mine = records.filter(r => r.studentId === s.studentId);
+    const mine = byStudent.get(s.studentId) || [];
+    byStudent.delete(s.studentId);
     return { ...s, stats: calcStats(mine) };
   }).sort((a,b) => b.stats.total - a.stats.total);
 
+  const unlinked = [...byStudent.values()].flat();
+  const unlinkedStats = calcStats(unlinked);
   const overall = calcStats(records);
   const dist = [
     { label:'Present', count: overall.present, color:'var(--success)' },
@@ -1476,6 +1489,30 @@ function renderReportsPage(){
       <td data-label="Rate">${s.stats.rate}%</td>
     </tr>
   `).join('');
+
+  const unlinkedRow = unlinked.length ? `
+    <tr>
+      <td data-label="Student" class="cell-primary" style="color:var(--warn)">Unlinked records</td>
+      <td data-label="Student ID" class="cell-muted">Student not found</td>
+      ${isAdmin ? '<td data-label="Teacher">—</td>' : ''}
+      <td data-label="Present">${unlinkedStats.present}</td>
+      <td data-label="Late">${unlinkedStats.late}</td>
+      <td data-label="Absent">${unlinkedStats.absent}</td>
+      <td data-label="Total">${unlinkedStats.total}</td>
+      <td data-label="Rate">${unlinkedStats.rate}%</td>
+    </tr>
+  ` : '';
+
+  const totalRow = `
+    <tr style="font-weight:700">
+      <td data-label="Student" class="cell-primary" colspan="${isAdmin ? 3 : 2}">Total</td>
+      <td data-label="Present">${overall.present}</td>
+      <td data-label="Late">${overall.late}</td>
+      <td data-label="Absent">${overall.absent}</td>
+      <td data-label="Total">${overall.total}</td>
+      <td data-label="Rate">${overall.rate}%</td>
+    </tr>
+  `;
 
   const html = `
     <div class="stat-grid">
@@ -1505,25 +1542,30 @@ function renderReportsPage(){
         </div>
       </div>
       <div class="table-wrap">
-        ${summary.length ? `
+        ${summary.length || unlinked.length ? `
         <table class="data-table">
           <thead><tr><th>Student</th><th>Student ID</th>${isAdmin ? '<th>Teacher</th>' : ''}<th>Present</th><th>Late</th><th>Absent</th><th>Total</th><th>Rate</th></tr></thead>
-          <tbody>${rows}</tbody>
+          <tbody>${rows}${unlinkedRow}</tbody>
+          <tfoot>${totalRow}</tfoot>
         </table>` : renderEmptyState('No students to report on', 'Add student records to generate an attendance report.', null, null)}
       </div>
+      ${unlinked.length ? `<p class="section-sub" style="margin:12px 16px">${unlinked.length} attendance record${unlinked.length === 1 ? '' : 's'} belong${unlinked.length === 1 ? 's' : ''} to a Student ID that is no longer on the student list. ${unlinked.length === 1 ? 'It is' : 'They are'} still counted in the totals so this report matches the Attendance page. You can review or delete ${unlinked.length === 1 ? 'it' : 'them'} there.</p>` : ''}
     </div>
   `;
   setHTML(document.getElementById('page-reports'), html);
 
   document.getElementById('reportFrom').addEventListener('change', e => { state.reportFrom = e.target.value; renderReportsPage(); });
   document.getElementById('reportTo').addEventListener('change', e => { state.reportTo = e.target.value; renderReportsPage(); });
-  document.getElementById('exportCsvBtn').addEventListener('click', () => exportReportCsv(summary));
+  document.getElementById('exportCsvBtn').addEventListener('click', () => exportReportCsv(summary, unlinkedStats, overall));
 }
 
-function exportReportCsv(summary){
+function exportReportCsv(summary, unlinkedStats, overall){
   const isAdmin = getSession().role === 'admin';
   const header = ['Student Name','Student ID', ...(isAdmin ? ['Teacher'] : []), 'Present','Late','Absent','Total','Attendance Rate (%)'];
-  const rows = summary.map(s => [s.name, s.studentId, ...(isAdmin ? [teacherNameFor(s.teacherId)] : []), s.stats.present, s.stats.late, s.stats.absent, s.stats.total, s.stats.rate]);
+  const statCells = st => [st.present, st.late, st.absent, st.total, st.rate];
+  const rows = summary.map(s => [s.name, s.studentId, ...(isAdmin ? [teacherNameFor(s.teacherId)] : []), ...statCells(s.stats)]);
+  if (unlinkedStats && unlinkedStats.total) rows.push(['Unlinked records', 'Student not found', ...(isAdmin ? ['—'] : []), ...statCells(unlinkedStats)]);
+  if (overall) rows.push(['Total', '', ...(isAdmin ? [''] : []), ...statCells(overall)]);
   const csv = [header, ...rows].map(r => r.map(cell => `"${String(cell).replace(/"/g,'""')}"`).join(',')).join('\n');
   const blob = new Blob([csv], { type:'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
